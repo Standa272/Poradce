@@ -62,16 +62,36 @@ const $=id=>document.getElementById(id);
 let game=new Chess(),sel=null,flip=false,best=null;
 let sf=null,ready=false,running=false,queued=false,lastInfo=null;
 
-async function initEngine(){
-  try{
-    const code=await (await fetch(SF_URL)).text();
-    const url=URL.createObjectURL(new Blob([code],{type:'application/javascript'}));
-    sf=new Worker(url);
-    sf.onmessage=e=>onLine(typeof e.data==='string'?e.data:String(e.data));
-    sf.postMessage('uci');
-  }catch(err){
+const SOURCES=[
+  'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js',
+  'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js',
+  'https://cdn.jsdelivr.net/npm/stockfish@10.0.2/src/stockfish.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.wasm.js'
+];
+let gotUci=false;
+async function initEngine(i=0){
+  if(i>=SOURCES.length){
     $('adv').textContent='Stockfish se nepodařilo načíst';
-    $('info').textContent='Zkontroluj připojení k internetu a otevři stránku znovu.';
+    $('info').textContent='Zkoušel jsem '+SOURCES.length+' zdroje. Pošli mi screenshot této stránky.';
+    return;
+  }
+  $('adv').textContent='Načítám Stockfish…';
+  $('info').textContent='Zdroj '+(i+1)+' z '+SOURCES.length+' (může trvat až 20 s)';
+  gotUci=false;
+  try{
+    const r=await fetch(SOURCES[i]);
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const code=await r.text();
+    const url=URL.createObjectURL(new Blob([code],{type:'application/javascript'}));
+    if(sf){try{sf.terminate()}catch(e){}}
+    sf=new Worker(url);
+    sf.onmessage=e=>{const l=typeof e.data==='string'?e.data:String(e.data);if(l==='uciok')gotUci=true;onLine(l)};
+    sf.onerror=()=>{if(!gotUci)initEngine(i+1)};
+    sf.postMessage('uci');
+    setTimeout(()=>{if(!gotUci)sf.postMessage('uci')},4000);
+    setTimeout(()=>{if(!gotUci){try{sf.terminate()}catch(e){}initEngine(i+1)}},20000);
+  }catch(err){
+    initEngine(i+1);
   }
 }
 function onLine(l){

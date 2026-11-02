@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Poradce">
+<title>Šachový poradce (Stockfish)</title>
+<style>
+:root{--bg:#f4f1ea;--fg:#1d1d1b;--card:#fff;--hl:#f6e05e;--best:#4da3ff;--mut:#6b6b66;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root{--bg:#1b1b1a;--fg:#eeeae0;--card:#2a2a28;--mut:#a5a59d}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,system-ui,"Helvetica Neue",sans-serif}
+main{max-width:520px;margin:0 auto;padding:12px}
+h1{font-size:20px;margin:4px 0 10px}
+#board{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));grid-template-rows:repeat(8,minmax(0,1fr));width:100%;aspect-ratio:1;border-radius:6px;overflow:hidden;touch-action:manipulation}
+.sq{min-width:0;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:min(9.5vw,48px);line-height:1;user-select:none;position:relative}
+.sq.l{background:#f0d9b5}.sq.d{background:#b58863}
+.sq.sel{background:var(--hl)!important}
+.sq.tgt::after{content:"";width:28%;height:28%;border-radius:50%;background:rgba(0,0,0,.25);position:absolute}
+.sq.best{box-shadow:inset 0 0 0 4px var(--best)}
+.pc{font-family:"Apple Symbols","Segoe UI Symbol","DejaVu Sans",serif;font-variant-emoji:text}
+.w .pc{color:#fff;-webkit-text-stroke:1.5px #111;paint-order:stroke fill;text-shadow:0 1px 1px rgba(0,0,0,.5)}
+.b .pc{color:#111;-webkit-text-stroke:1px #000}
+.co{position:absolute;font-size:10px;font-weight:700;line-height:1;opacity:.8;pointer-events:none;font-style:normal}
+.co.r{top:2px;left:3px}.co.f{bottom:2px;right:3px}
+.sq.l .co{color:#b58863}.sq.d .co{color:#f0d9b5}
+.panel{background:var(--card);border-radius:10px;padding:12px;margin-top:10px}
+#adv{font-size:22px;font-weight:700}
+#info{color:var(--mut);font-size:14px;margin-top:4px;min-height:20px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+button,select{font:inherit;padding:9px 12px;border-radius:8px;border:1px solid var(--mut);background:var(--card);color:var(--fg)}
+button.p{background:var(--best);color:#fff;border-color:var(--best)}
+#log{font-size:13px;color:var(--mut);margin-top:8px;line-height:1.5}
+#promo{display:none;gap:8px;margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>♞ Šachový poradce</h1>
+<div id="board"></div>
+<div id="promo" class="row"></div>
+<div class="panel">
+<div id="adv">Načítám Stockfish…</div>
+<div id="info"></div>
+<div class="row">
+<label>Čas na tah <select id="time"><option value="1000">1 s</option><option value="3000" selected>3 s</option><option value="8000">8 s</option><option value="20000">20 s</option></select></label>
+<select id="me"><option value="w">Hraju bílé</option><option value="b">Hraju černé</option></select>
+<button id="flip">Otočit</button>
+<button id="play" class="p">Zahrát tah</button>
+<button id="undo">Zpět</button>
+<button id="new">Nová hra</button>
+</div>
+<div id="log"></div>
+</div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script>
+const SF_URL='https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js';
+const G={p:'♟\uFE0E',n:'♞\uFE0E',b:'♝\uFE0E',r:'♜\uFE0E',q:'♛\uFE0E',k:'♚\uFE0E'};
+const $=id=>document.getElementById(id);
+let game=new Chess(),sel=null,flip=false,best=null;
+let sf=null,ready=false,running=false,queued=false,lastInfo=null;
+
+async function initEngine(){
+  try{
+    const code=await (await fetch(SF_URL)).text();
+    const url=URL.createObjectURL(new Blob([code],{type:'application/javascript'}));
+    sf=new Worker(url);
+    sf.onmessage=e=>onLine(typeof e.data==='string'?e.data:String(e.data));
+    sf.postMessage('uci');
+  }catch(err){
+    $('adv').textContent='Stockfish se nepodařilo načíst';
+    $('info').textContent='Zkontroluj připojení k internetu a otevři stránku znovu.';
+  }
+}
+function onLine(l){
+  if(l==='uciok'){sf.postMessage('setoption name Skill Level value 20');sf.postMessage('isready')}
+  else if(l==='readyok'){if(!ready){ready=true;advise()}}
+  else if(l.startsWith('info')&&l.includes(' score ')){
+    const d=/ depth (\d+)/.exec(l),cp=/ score cp (-?\d+)/.exec(l),mt=/ score mate (-?\d+)/.exec(l);
+    if(d&&(cp||mt))lastInfo={d:+d[1],cp:cp?+cp[1]:null,mate:mt?+mt[1]:null};
+  }else if(l.startsWith('bestmove')){
+    running=false;
+    if(queued){queued=false;advise();return}
+    const m=l.split(' ')[1];
+    if(!m||m==='(none)')return;
+    const mv=game.moves({verbose:true}).find(x=>x.from+x.to+(x.promotion||'')===m);
+    if(!mv)return;
+    best=mv;
+    const sign=game.turn()==='w'?1:-1;
+    let ev='';
+    if(lastInfo){ev=lastInfo.mate!==null?('mat v '+Math.abs(lastInfo.mate)+(lastInfo.mate*sign>0?' (ty matuješ)':' (hrozí ti mat)')):'hodnocení: '+((lastInfo.cp*sign)/100>0?'+':'')+((lastInfo.cp*sign)/100).toFixed(1)+' (kladné = bílý lépe)'}
+    $('adv').textContent='Nejlepší tah: '+mv.san;
+    $('info').textContent=ev+(lastInfo?' · hloubka '+lastInfo.d:'');
+    draw();
+  }
+}
+function advise(){
+  best=null;draw();
+  if(game.game_over()){$('adv').textContent=game.in_checkmate()?'Mat.':'Remíza.';$('info').textContent='';return}
+  if(game.turn()!==$('me').value){$('adv').textContent='Zadej tah soupeře';$('info').textContent='Nic se nepočítá, dokud nejsi na tahu.';return}
+  if(!ready)return;
+  if(running){queued=true;sf.postMessage('stop');return}
+  running=true;lastInfo=null;
+  $('adv').textContent='Počítám…';$('info').textContent='';
+  sf.postMessage('position fen '+game.fen());
+  sf.postMessage('go movetime '+$('time').value);
+}
+function draw(){
+  const bd=$('board');bd.innerHTML='';
+  const tg=sel?game.moves({square:sel,verbose:true}).map(m=>m.to):[];
+  for(let i=0;i<64;i++){
+    let r=Math.floor(i/8),c=i%8;if(flip){r=7-r;c=7-c}
+    const name='abcdefgh'[c]+(8-r),p=game.get(name);
+    const d=document.createElement('div');
+    d.className='sq '+((r+c)%2?'d':'l')+(sel===name?' sel':'')+(tg.includes(name)?' tgt':'')+(best&&(best.from===name||best.to===name)?' best':'');
+    if(p){const s=document.createElement('span');s.className='pc';s.textContent=G[p.type];d.appendChild(s);d.classList.add(p.color)}
+    const ci=flip?7-c:c,ri=flip?7-r:r;
+    if(ci===0){const e=document.createElement('i');e.className='co r';e.textContent=String(8-r);d.appendChild(e)}
+    if(ri===7){const e=document.createElement('i');e.className='co f';e.textContent='abcdefgh'[c];d.appendChild(e)}
+    d.onclick=()=>tap(name);
+    bd.appendChild(d);
+  }
+  const h=game.history();let s='';
+  for(let i=0;i<h.length;i+=2)s+=(i/2+1)+'. '+h[i]+' '+(h[i+1]||'')+'  ';
+  $('log').textContent=s;
+}
+function tap(n){
+  if(game.game_over())return;
+  if(sel){
+    const ms=game.moves({square:sel,verbose:true}).filter(m=>m.to===n);
+    if(ms.length){
+      if(ms[0].promotion){askPromo(sel,n);return}
+      game.move({from:sel,to:n});sel=null;advise();return;
+    }
+  }
+  const p=game.get(n);
+  sel=(p&&p.color===game.turn())?n:null;draw();
+}
+function askPromo(f,t){
+  const pr=$('promo');pr.style.display='flex';pr.innerHTML='';
+  ['q','r','b','n'].forEach(k=>{const b=document.createElement('button');b.textContent=G[k];b.onclick=()=>{pr.style.display='none';game.move({from:f,to:t,promotion:k});sel=null;advise()};pr.appendChild(b)});
+}
+$('flip').onclick=()=>{flip=!flip;draw()};
+$('undo').onclick=()=>{game.undo();sel=null;advise()};
+$('new').onclick=()=>{game=new Chess();sel=null;advise()};
+$('time').onchange=advise;
+$('me').onchange=()=>{flip=$('me').value==='b';sel=null;advise()};
+$('play').onclick=()=>{if(best&&game.turn()===$('me').value){game.move({from:best.from,to:best.to,promotion:best.promotion});sel=null;advise()}};
+draw();
+initEngine();
+</script>
+</body>
+</html>

@@ -33,6 +33,11 @@ button,select{font:inherit;padding:9px 12px;border-radius:8px;border:1px solid v
 button.p{background:var(--best);color:#fff;border-color:var(--best)}
 #log{font-size:13px;color:var(--mut);margin-top:8px;line-height:1.5}
 #promo{display:none;gap:8px;margin-top:8px}
+#editor{display:none}
+.tool{background:#d9c9a8;border-color:#b58863;padding:2px 8px;font-size:26px;min-width:44px;color:#111}
+.tool.on{outline:3px solid var(--best)}
+input[type=text]{font:inherit;padding:9px;border-radius:8px;border:1px solid var(--mut);background:var(--card);color:var(--fg);flex:1;min-width:0}
+label{font-size:14px}
 </style>
 </head>
 <body>
@@ -40,16 +45,26 @@ button.p{background:var(--best);color:#fff;border-color:var(--best)}
 <h1>♞ Šachový poradce</h1>
 <div id="board"></div>
 <div id="promo" class="row"></div>
+<div id="editor" class="panel">
+<div><b>Rozehraná hra</b> – vyber figuru, klepni na políčko desky (✕ maže).</div>
+<div id="pal" class="row"></div>
+<div class="row"><label>Na tahu <select id="ed-turn"><option value="w">bílý</option><option value="b">černý</option></select></label></div>
+<div class="row"><label><input type="checkbox" id="cK" checked> O-O bílý</label><label><input type="checkbox" id="cQ" checked> O-O-O bílý</label><label><input type="checkbox" id="ck" checked> O-O černý</label><label><input type="checkbox" id="cq" checked> O-O-O černý</label></div>
+<div class="row"><button id="ed-ok" class="p">Hotovo</button><button id="ed-start">Základní</button><button id="ed-clear">Vyčistit</button><button id="ed-cancel">Zrušit</button></div>
+<div class="row"><input type="text" id="fen" placeholder="nebo vlož FEN"><button id="fenload">Načíst</button></div>
+<div id="einfo" style="color:#d33;font-size:14px;margin-top:6px"></div>
+</div>
 <div class="panel">
 <div id="adv">Načítám Stockfish…</div>
 <div id="info"></div>
 <div class="row">
+<select id="mode"><option value="ask" selected>Radit na požádání</option><option value="auto">Radit automaticky</option></select>
 <label>Čas na tah <select id="time"><option value="1000">1 s</option><option value="3000" selected>3 s</option><option value="8000">8 s</option><option value="20000">20 s</option></select></label>
 <select id="me"><option value="w">Hraju bílé</option><option value="b">Hraju černé</option></select>
 <button id="flip">Otočit</button>
-<button id="play" class="p">Zahrát tah</button>
+<button id="ask" class="p">Poradit</button><button id="play" class="p">Zahrát tah</button>
 <button id="undo">Zpět</button>
-<button id="new">Nová hra</button>
+<button id="new">Nová hra</button><button id="setup">Rozehraná hra</button>
 </div>
 <div id="log"></div>
 </div>
@@ -61,6 +76,7 @@ const G={p:'♟\uFE0E',n:'♞\uFE0E',b:'♝\uFE0E',r:'♜\uFE0E',q:'♛\uFE0E',k
 const $=id=>document.getElementById(id);
 let game=new Chess(),sel=null,flip=false,best=null;
 let sf=null,ready=false,running=false,queued=false,lastInfo=null;
+let qf=false,editing=false,tool='P',ed={};
 
 const SOURCES=[
   'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js',
@@ -102,7 +118,8 @@ function onLine(l){
     if(d&&(cp||mt))lastInfo={d:+d[1],cp:cp?+cp[1]:null,mate:mt?+mt[1]:null};
   }else if(l.startsWith('bestmove')){
     running=false;
-    if(queued){queued=false;advise();return}
+    if(editing){queued=false;return}
+    if(queued){queued=false;advise(qf);return}
     const m=l.split(' ')[1];
     if(!m||m==='(none)')return;
     const mv=game.moves({verbose:true}).find(x=>x.from+x.to+(x.promotion||'')===m);
@@ -116,11 +133,14 @@ function onLine(l){
     draw();
   }
 }
-function advise(){
+function advise(force){
   best=null;draw();
+  if(editing)return;
+  if(running&&sf){queued=true;qf=force;sf.postMessage('stop');return}
   if(game.game_over()){$('adv').textContent=game.in_checkmate()?'Mat.':'Remíza.';$('info').textContent='';return}
-  if(game.turn()!==$('me').value){$('adv').textContent='Zadej tah soupeře';$('info').textContent='Nic se nepočítá, dokud nejsi na tahu.';return}
-  if(!ready)return;
+  if(!force&&game.turn()!==$('me').value){$('adv').textContent='Zadej tah soupeře';$('info').textContent='Nic se nepočítá, dokud nejsi na tahu.';return}
+  if(!force&&$('mode').value==='ask'){$('adv').textContent='Klepni na Poradit';$('info').textContent='Radím jen na požádání.';return}
+  if(!ready){$('adv').textContent='Stockfish se ještě načítá…';return}
   if(running){queued=true;sf.postMessage('stop');return}
   running=true;lastInfo=null;
   $('adv').textContent='Počítám…';$('info').textContent='';
@@ -129,10 +149,10 @@ function advise(){
 }
 function draw(){
   const bd=$('board');bd.innerHTML='';
-  const tg=sel?game.moves({square:sel,verbose:true}).map(m=>m.to):[];
+  const tg=(!editing&&sel)?game.moves({square:sel,verbose:true}).map(m=>m.to):[];
   for(let i=0;i<64;i++){
     let r=Math.floor(i/8),c=i%8;if(flip){r=7-r;c=7-c}
-    const name='abcdefgh'[c]+(8-r),p=game.get(name);
+    const name='abcdefgh'[c]+(8-r),p=editing?(ed[name]||null):game.get(name);
     const d=document.createElement('div');
     d.className='sq '+((r+c)%2?'d':'l')+(sel===name?' sel':'')+(tg.includes(name)?' tgt':'')+(best&&(best.from===name||best.to===name)?' best':'');
     if(p){const s=document.createElement('span');s.className='pc';s.textContent=G[p.type];d.appendChild(s);d.classList.add(p.color)}
@@ -147,6 +167,11 @@ function draw(){
   $('log').textContent=s;
 }
 function tap(n){
+  if(editing){
+    if(tool==='x')delete ed[n];
+    else ed[n]={type:tool.toLowerCase(),color:tool===tool.toUpperCase()?'w':'b'};
+    draw();return;
+  }
   if(game.game_over())return;
   if(sel){
     const ms=game.moves({square:sel,verbose:true}).filter(m=>m.to===n);
@@ -165,9 +190,78 @@ function askPromo(f,t){
 $('flip').onclick=()=>{flip=!flip;draw()};
 $('undo').onclick=()=>{game.undo();sel=null;advise()};
 $('new').onclick=()=>{game=new Chess();sel=null;advise()};
-$('time').onchange=advise;
+$('time').onchange=()=>advise();
+$('mode').onchange=()=>advise();
+$('ask').onclick=()=>advise(true);
 $('me').onchange=()=>{flip=$('me').value==='b';sel=null;advise()};
-$('play').onclick=()=>{if(best&&game.turn()===$('me').value){game.move({from:best.from,to:best.to,promotion:best.promotion});sel=null;advise()}};
+$('play').onclick=()=>{if(best&&!editing){game.move({from:best.from,to:best.to,promotion:best.promotion});sel=null;advise()}};
+const PAL=['K','Q','R','B','N','P','k','q','r','b','n','p','x'];
+function buildPal(){
+  const p=$('pal');p.innerHTML='';
+  PAL.forEach(t=>{
+    const b=document.createElement('button');
+    b.className='tool'+(t===tool?' on':'')+(t==='x'?'':(t===t.toUpperCase()?' w':' b'));
+    if(t==='x')b.textContent='✕';
+    else{const s=document.createElement('span');s.className='pc';s.textContent=G[t.toLowerCase()];b.appendChild(s)}
+    b.onclick=()=>{tool=t;buildPal()};
+    p.appendChild(b);
+  });
+}
+function edFromGame(g){
+  ed={};const bd=g.board();
+  for(let r=0;r<8;r++)for(let c=0;c<8;c++){const p=bd[r][c];if(p)ed['abcdefgh'[c]+(8-r)]={type:p.type,color:p.color}}
+}
+function openEditor(){
+  if(running&&sf)sf.postMessage('stop');
+  queued=false;editing=true;sel=null;best=null;
+  edFromGame(game);
+  $('ed-turn').value=game.turn();$('einfo').textContent='';
+  $('editor').style.display='block';buildPal();
+  $('adv').textContent='Úprava pozice';$('info').textContent='';
+  draw();
+}
+function closeEditor(){editing=false;$('editor').style.display='none';advise()}
+function edFen(){
+  let s='';
+  for(let r=0;r<8;r++){
+    let e=0;
+    for(let c=0;c<8;c++){
+      const p=ed['abcdefgh'[c]+(8-r)];
+      if(!p)e++;else{if(e){s+=e;e=0}s+=p.color==='w'?p.type.toUpperCase():p.type}
+    }
+    if(e)s+=e;if(r<7)s+='/';
+  }
+  const at=(sq,t,c)=>{const p=ed[sq];return !!p&&p.type===t&&p.color===c};
+  let cs='';
+  if($('cK').checked&&at('e1','k','w')&&at('h1','r','w'))cs+='K';
+  if($('cQ').checked&&at('e1','k','w')&&at('a1','r','w'))cs+='Q';
+  if($('ck').checked&&at('e8','k','b')&&at('h8','r','b'))cs+='k';
+  if($('cq').checked&&at('e8','k','b')&&at('a8','r','b'))cs+='q';
+  return s+' '+$('ed-turn').value+' '+(cs||'-')+' - 0 1';
+}
+function applyFen(fen){
+  const f=fen.trim().split(/\s+/);
+  if(!f[0])return 'Vlož FEN.';
+  if(f.length<2)f.push('w');
+  while(f.length<6)f.push(['-','-','0','1'][f.length-2]);
+  const s=f.join(' '),b=f[0],rows=b.split('/');
+  const kw=(b.match(/K/g)||[]).length,kb=(b.match(/k/g)||[]).length;
+  if(kw!==1||kb!==1)return 'Každá strana musí mít právě jednoho krále.';
+  if(/[Pp]/.test(rows[0]+rows[rows.length-1]))return 'Pěšec nemůže stát na 1. ani 8. řadě.';
+  const t=new Chess();
+  if(!t.validate_fen(s).valid||!t.load(s))return 'Neplatná pozice (FEN).';
+  const fl=f.slice();fl[1]=f[1]==='w'?'b':'w';fl[3]='-';
+  const t2=new Chess();
+  if(t2.load(fl.join(' '))&&t2.in_check())return 'Strana, která není na tahu, by byla v šachu.';
+  game=t;editing=false;$('editor').style.display='none';sel=null;
+  advise();return '';
+}
+$('setup').onclick=openEditor;
+$('ed-ok').onclick=()=>{$('einfo').textContent=applyFen(edFen())};
+$('ed-cancel').onclick=closeEditor;
+$('ed-clear').onclick=()=>{ed={};draw()};
+$('ed-start').onclick=()=>{edFromGame(new Chess());$('ed-turn').value='w';draw()};
+$('fenload').onclick=()=>{$('einfo').textContent=applyFen($('fen').value)};
 draw();
 initEngine();
 </script>
